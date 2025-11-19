@@ -4,38 +4,17 @@ from torchvision import transforms
 from PIL import Image
 import torch
 import torch.nn as nn
+from models.ResNet18 import ResNetClassifier
+from utils.ResNet18_transforms import val_transform
+from utils.test import test
+from torchvision import datasets
+from torch.utils.data import DataLoader
 
-# Defining model
-class NeuralNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.flatten = nn.Flatten()
-        self.linear_relu_stack = nn.Sequential(
-            nn.Linear(28*28, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512,10)
-        )
-
-    # Model flow
-    def forward(self, x):
-        x = self.flatten(x)
-        logits = self.linear_relu_stack(x)
-        return logits
     
 # Loading in trained model, weights and switching to eval mode
-model = NeuralNetwork()
+model = ResNetClassifier()
 model.load_state_dict(torch.load("weights_v1.pt", map_location="cpu"))
 model.eval()
-
-# Image preprocessing
-# Change to grey, resize and convert to tensor
-preprocessing_transform = transforms.Compose([
-    transforms.Grayscale(),
-    transforms.Resize((28, 28)),
-    transforms.ToTensor()
-])
 
 # Initialize API
 app = FastAPI(title="Image Classification")
@@ -47,13 +26,22 @@ def root():
 # Creating endpoint
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    input_img = Image.open(file.file).convert("L")
-    transformed_img = preprocessing_transform(input_img).unsqueeze(0)
+    input_img = Image.open(file.file).convert("RGB")
+    transformed_img = val_transform(input_img).unsqueeze(0)
 
     # Execute prediction
     with torch.no_grad():
         output = model(transformed_img)
-        pred_result = torch.argmax(output, dim = 1).item()
+        pred_result = torch.argmax(output, 1).item()  
+        probabilities = torch.softmax(output, 1)
+        confidence = probabilities[0][pred_result].item()
 
-        # Return an output
-        return JSONResponse({"predicted_result": int(pred_result)})
+    # Setting up labels
+    class_names = ["Normal", "Pneumonia"]
+    predicted_label = class_names[pred_result]
+
+    # Return result
+    return JSONResponse({
+        "predicted_label": predicted_label,
+        "confidence": round(confidence, 4)
+    })
