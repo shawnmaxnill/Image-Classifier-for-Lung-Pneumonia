@@ -1,134 +1,132 @@
-# Imports
-import os
-from dotenv import load_dotenv
+# Package Imports
 import torch
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+from torch.utils.data import Subset, WeightedRandomSampler
 from torch import nn
-from torch.utils.data import DataLoader
-from torchvision import datasets
-from torchvision.transforms import ToTensor
-from torchvision import datasets, transforms
-import matplotlib.pyplot as plt
 
-# Retrieving paths
-load_dotenv()
-train_dir = os.getenv('ORG_TRAIN_DIR')
-test_dir  = os.getenv('ORG_TEST_DIR')
+# File Imports
+from dataloader.training_dataloader import get_train_val_loaders, get_test_loader
+from dataloader.loading_dataset import train_data, test_data
+from models.ResNet18 import ResNetClassifier
+from utils.early_stopping import EarlyStopping
+from utils.train import train
+from utils.test import test
+from utils.metrics import print_metrics
+from utils.plotting import plot_all_folds
 
-# Data preprocessing
-transform = transforms.Compose([
-    transforms.Resize((255, 255)),  # resize all images
-    transforms.ToTensor(),          # convert to PyTorch tensor
-    transforms.Normalize(mean=[0.5], std=[0.5])  # normalize grayscale images
-])
+# Function to merge both train and testing for CV
+def run_sequence(train_DL, test_DL, model, loss_fn, optimizer, epochs):
 
-# Loading in datasets
-train_data = datasets.ImageFolder(root=train_dir, transform=transform)
-test_data  = datasets.ImageFolder(root=test_dir, transform=transform)
+    # Statistics
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'val_accuracy': []
+    }
 
-# Passing data into DataLoader
-# iterable, auto batching, sampling, shuffling and multiprocessing
-batch_size = 32
+    early_stopping = EarlyStopping(patience=5)
 
-train_dataloader = DataLoader(train_data, batch_size=batch_size)
-test_dataloader = DataLoader(test_data, batch_size=batch_size)
+    for epoch in range(epochs):
 
-# Creating model
+        print(f"Epoch Number {epoch + 1}")
+        train_loss = train(train_DL, model, loss_fn, optimizer)
+        accuracy, val_loss = test(test_DL, model, loss_fn)
+
+        # Storing statistics
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        history['val_accuracy'].append(accuracy)
+
+        # Early stopping
+        stop = early_stopping(model, val_loss)
+        print(early_stopping.status)
+        if stop:
+            print("Early stopping triggered!")
+            break
+
+    return history
+
+# Device and Set Seed
+torch.manual_seed(40)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using {device} device")
 
-class NeuralNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.flatten = nn.Flatten()
-        self.linear_relu_stack = nn.Sequential(
-            nn.Linear(28*28, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512,10)
-        )
-
-    # Model flow
-    def forward(self, x):
-        x = self.flatten(x)
-        logits = self.linear_relu_stack(x)
-        return logits
-    
-model = NeuralNetwork().to(device)
-print(model)
-    
-# Training Data
-def train(dataloader, model, loss_fn, optimizer):
-    size = len(dataloader.dataset)
-    model.train()
-
-    for batch, (X, y) in enumerate(dataloader):
-        X, y = X.to(device), y.to(device)
-
-        # Computing prediction error
-        pred = model(X)
-        loss = loss_fn(pred, y)
-
-        # Backpropagation
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-
-        if batch % 100 == 0:
-            loss, current = loss.item(), (batch + 1) * len(X)
-            print(f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]")
-
-# Testing data aka Validation
-validation_loss = []
-
-def test(dataloader, model, loss_fn):
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
-    model.eval()
-    test_loss, correct = 0, 0
-
-    with torch.no_grad():
-        for X, y in dataloader:
-            X, y = X.to(device), y.to(device)
-            pred = model(X)
-            test_loss += loss_fn(pred, y).item()
-            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
-    
-    test_loss /= num_batches
-    correct /= size
-    validation_loss.append(test_loss)
-    print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
-
-# Epoch loop
-learning_rate = 1e-3
-loss_fn = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr = learning_rate)
-
+# Setting up Stratified K-Fold
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=40)
+# Early stopping params
+batch_size = 16
 epochs = 10
-for t in range(epochs):
-    print(f"Epoch {t+1}\n-------------------")
-    train(train_dataloader, model, loss_fn, optimizer)
-    test(test_dataloader, model, loss_fn)
-print("Epoch cycle completed")
+freezed_history_lst = []
+unfreezed_history_lst = []
 
-print("Generating Loss Graph...")
-plot_epoch = list(range(1, epochs + 1))
+# Main SKFold Loop
+for fold, (train_idx, val_idx) in enumerate(skf.split(np.zeros(len(train_data.targets)), train_data.targets)):
+    # Subset Data from current SKFold
+    print(f"Fold: {fold}")
 
-plt.figure(figsize=(8,5))
-plt.plot(plot_epoch, validation_loss, marker='s', label='Validation Loss')  # optional
+    train_subset = Subset(train_data, train_idx)
+    val_subset = Subset(train_data, val_idx)
 
-plt.title("Validation Loss vs Epochs")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.xticks(plot_epoch)
-plt.legend()
-plt.grid(True)
-plt.savefig("validation_plot.png")
-print("Graph Generation Completed")
+    # Training Data modification via Weighted sampler
+    train_targets = np.array(train_data.targets) 
+    train_targets = train_targets[train_idx] # Retrieve data only in the SKFold
+    class_counts = np.bincount(train_targets)
+    class_weights = 1. / torch.tensor(class_counts, dtype= torch.float32)
 
-# Saving model
-save_name = "weights_v1.pt"
-torch.save(model.state_dict(), save_name)
-print(f"Model weights saved as {save_name}")
-print("Workflow completed")
+    # Assigning weights to all labels (Weights Generation)
+    sample_weights = class_weights[train_targets]
+
+    train_sampler = WeightedRandomSampler(
+        weights= sample_weights,
+        num_samples= len(sample_weights),
+        replacement=True
+        )
+    
+    # Getting DataLoaders
+    train_loader, val_loader = get_train_val_loaders(train_data, train_idx, val_idx, batch_size=batch_size)
+
+    # Reinitializing model and optimizers =================================
+    resnet = ResNetClassifier(freeze_backbone=True)
+    optimizer = torch.optim.Adam(resnet.get_model().fc.parameters(), lr=1e-3)
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Freezing model
+    print("Classifier Training (Final Layer only)")
+    resnet.freeze_backbone()
+    freezed_model_hist = run_sequence(train_loader, val_loader, resnet.get_model(), loss_fn, optimizer, epochs)
+
+    # Unfreeze model
+    resnet.unfreeze_backbone()
+    optimizer = torch.optim.Adam(resnet.get_model().parameters(), lr=1e-4) # lesser learning rate for fine tuning
+
+    print("Fine tuning entire network, Unfreezing model")
+    resnet.unfreeze_backbone()
+    unfreezed_model_hist = run_sequence(train_loader, val_loader, resnet.get_model(), loss_fn, optimizer, epochs)
+
+    freezed_history_lst.append(freezed_model_hist)
+    unfreezed_history_lst.append(unfreezed_model_hist)
+
+
+# Printing summary metrics
+print_metrics(unfreezed_history_lst)
+
+# Flatten function for plotting
+def flatten_loss(loss_list):
+    # If elements are lists, flatten them
+    if isinstance(loss_list[0], list) or isinstance(loss_list[0], tuple):
+        return [x[0] for x in loss_list]
+    return loss_list
+
+plot_all_folds(epochs, unfreezed_history_lst)
+
+# Testing model on unseen data
+resnet = ResNetClassifier(num_classes=2)
+model = resnet.get_model()
+model.load_state_dict(torch.load("weights.pt"))
+
+
+test_loader = get_test_loader(test_data, batch_size)
+test(test_loader, model, loss_fn)
+
 
