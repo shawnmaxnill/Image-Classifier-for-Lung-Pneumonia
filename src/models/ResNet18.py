@@ -2,8 +2,9 @@
 from torchvision import models
 from torch import nn
 
-class ResNetClassifier:
+class ResNetClassifier(nn.Module):
     def __init__(self, num_classes=2, device='cuda', freeze_backbone=True):
+        super(ResNetClassifier, self).__init__()
         self.device = device
         self.model = models.resnet18(pretrained=True)
 
