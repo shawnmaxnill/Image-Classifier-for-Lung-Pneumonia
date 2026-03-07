@@ -12,14 +12,16 @@ from torch.utils.data import DataLoader
 
     
 # Loading in trained model, weights and switching to eval mode
-model = ResNetClassifier()
-model.load_state_dict(torch.load("weights_v1.pt", map_location="cpu"))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = ResNetClassifier().get_model()
+model.load_state_dict(torch.load("weights.pt", map_location=device))
+model.to(device)
 model.eval()
 
 # Initialize API
 app = FastAPI(title="Image Classification")
 
-@app.get()
+@app.get("/")
 def root():
     return {"You are now in localhost runnning an Image Classifier"}
 
@@ -27,7 +29,7 @@ def root():
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     input_img = Image.open(file.file).convert("RGB")
-    transformed_img = val_transform(input_img).unsqueeze(0)
+    transformed_img = val_transform(input_img).unsqueeze(0).to(device)
 
     # Execute prediction
     with torch.no_grad():
